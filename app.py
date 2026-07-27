@@ -137,7 +137,7 @@ def main():
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    prompt = st.chat_input("Ask anything about the uploaded documents...")
+    prompt = st.chat_input("First upload and process , then ask anything about the uploaded documents...")
 
     if prompt:
 
