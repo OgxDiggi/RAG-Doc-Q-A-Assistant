@@ -1,17 +1,17 @@
 # Virtual environments
 newenv/
-.venv/
 venv/
+.venv/
 
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
 
 # Environment variables
 .env
 
-# Streamlit
-.streamlit/
+# Streamlit secrets
+.streamlit/secrets.toml
 
 # VS Code
 .vscode/

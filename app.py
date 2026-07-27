@@ -1,16 +1,13 @@
-import os
-
 import streamlit as st
-from dotenv import load_dotenv
 from PyPDF2 import PdfReader
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_huggingface import (
+    HuggingFaceEmbeddings,
+    HuggingFaceEndpoint,
+    ChatHuggingFace,
+)
 from langchain_community.vectorstores import FAISS
-from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
-
-load_dotenv()
-
 
 # ---------------- PDF ---------------- #
 
@@ -34,94 +31,189 @@ def get_pdf_text(pdf_docs):
 
 def get_text_chunks(text):
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
+        chunk_size=700,
+        chunk_overlap=150,
     )
-
     return splitter.split_text(text)
 
 
-# ---------------- Embeddings ---------------- #
+# ---------------- Vector Store ---------------- #
 
 
+@st.cache_resource(show_spinner=False)
 def get_vectorstore(chunks):
     embeddings = HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
 
-    vectorstore = FAISS.from_texts(texts=chunks, embedding=embeddings)
-
-    return vectorstore
+    return FAISS.from_texts(chunks, embeddings)
 
 
+# ---------------- LLM ---------------- #
+
+
+@st.cache_resource(show_spinner=False)
 def get_llm():
-    llm = HuggingFaceEndpoint(
-        repo_id="mistralai/Mistral-7B-Instruct-v0.3",
+    endpoint = HuggingFaceEndpoint(
+        repo_id="Qwen/Qwen3-8B",
         task="text-generation",
-        huggingfacehub_api_token=os.getenv("HF_TOKEN"),
+        huggingfacehub_api_token=st.secrets["HF_TOKEN"],
         max_new_tokens=512,
         temperature=0.3,
     )
 
-    return ChatHuggingFace(llm=llm)
+    return ChatHuggingFace(llm=endpoint)
 
 
-def get_conversation_chain(vectorstore):
-    llm = HuggingFaceEndpoint(
-        repo_id="mistralai/Mistral-7B-Instruct-v0.3",
-        task="text-generation",
-        max_new_tokens=512,
-        temperature=0.5,
-    )
-
-    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-
-    conversation_chain = ConversationalRetrievalChain.from_llm(
-        llm=llm,
-        retriever=vectorstore.as_retriever(),
-        memory=memory,
-    )
-
-    return conversation_chain
-
-
-def handle_userinput(user_question):
-    response = st.session_state.conversation({"question": user_question})
-    st.session_state.chat_history = response["chat_history"]
-
-    for i, message in enumerate(st.session_state.chat_history):
-        if i % 2 == 0:
-            st.write(
-                user_template.replace("{{MSG}}", message.content),
-                unsafe_allow_html=True,
-            )
-        else:
-            st.write(
-                bot_template.replace("{{MSG}}", message.content), unsafe_allow_html=True
-            )
+# ---------------- Main ---------------- #
 
 
 def main():
-    st.title("PDF Chatbot")
-
-    pdfs = st.file_uploader(
-        "Upload PDFs",
-        type="pdf",
-        accept_multiple_files=True,
+    st.set_page_config(
+        page_title="AI Document Chatbot",
+        page_icon="🤖",
+        layout="wide",
     )
 
-    if st.button("Process"):
-        raw_text = get_pdf_text(pdfs)
-        chunks = get_text_chunks(raw_text)
+    st.title("🤖 AI Document Chatbot")
+    st.caption("Upload PDFs and ask questions about them.")
 
-        vectorstore = get_vectorstore(chunks)
+    if "vectorstore" not in st.session_state:
+        st.session_state.vectorstore = None
 
-        st.success(f"Done! Created {len(chunks)} chunks.")
-        st.write(vectorstore)
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
 
-        llm = get_llm()
-        response = llm.invoke("Say hello in one sentence.")
-        st.write(response.content)
+    # Sidebar
+    with st.sidebar:
+        st.header("📄 Upload Documents")
+
+        pdfs = st.file_uploader(
+            "Choose PDF files",
+            type="pdf",
+            accept_multiple_files=True,
+        )
+
+        if st.button("📄 Process Documents"):
+            if not pdfs:
+                st.warning("Please upload at least one PDF.")
+                st.stop()
+
+            progress = st.progress(0)
+            status = st.empty()
+
+            # Step 1
+            status.text("📖 Reading PDF files...")
+            progress.progress(20)
+            raw_text = get_pdf_text(pdfs)
+
+            # Step 2
+            status.text("✂️ Splitting text into chunks...")
+            progress.progress(45)
+            chunks = get_text_chunks(raw_text)
+
+            # Step 3
+            status.text("🧠 Creating embeddings...")
+            progress.progress(70)
+
+            vectorstore = get_vectorstore(chunks)
+
+            # Step 4
+            status.text("💾 Building vector database...")
+            progress.progress(90)
+
+            st.session_state.vectorstore = vectorstore
+
+            # Complete
+            progress.progress(100)
+            status.text("✅ Processing Complete!")
+
+            st.success(
+                f"Successfully processed {len(pdfs)} PDF(s) into {len(chunks)} searchable chunks."
+            )
+
+    # Display previous chat
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    prompt = st.chat_input("Ask anything about the uploaded documents...")
+
+    if prompt:
+
+        st.session_state.messages.append(
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        )
+
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        with st.chat_message("assistant"):
+
+            if st.session_state.vectorstore is None:
+
+                answer = "⚠️ Please upload and process PDFs first."
+
+            else:
+
+                retriever = st.session_state.vectorstore.as_retriever(
+                    search_type="mmr",
+                    search_kwargs={
+                        "k": 6,
+                        "fetch_k": 20,
+                    },
+                )
+
+                docs = retriever.invoke(prompt)
+
+                context = "\n\n".join(doc.page_content for doc in docs)
+
+                llm = get_llm()
+
+                try:
+                    with st.spinner("Generating answer..."):
+
+                        response = llm.invoke(f"""
+You are an intelligent AI assistant for document question answering.
+
+Rules:
+- Answer ONLY using the provided context.
+- Do NOT use outside knowledge.
+- If the answer is not present in the context, reply exactly:
+  "I couldn't find that information in the uploaded documents."
+- Keep the answer concise, accurate, and well-structured.
+
+Context:
+{context}
+
+Question:
+{prompt}
+
+Answer:
+""")
+
+                    answer = response.content
+
+                except Exception:
+                    answer = "⚠️ Unable to generate a response. Please try again."
+
+            st.markdown(answer)
+
+            if st.session_state.vectorstore is not None:
+                with st.expander("📚 Retrieved Context"):
+                    for i, doc in enumerate(docs, 1):
+                        st.markdown(f"**Chunk {i}**")
+                        st.write(doc.page_content[:500] + "...")
+
+        st.session_state.messages.append(
+            {
+                "role": "assistant",
+                "content": answer,
+            }
+        )
 
 
 if __name__ == "__main__":
